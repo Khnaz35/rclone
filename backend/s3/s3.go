@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -60,6 +61,7 @@ import (
 	"github.com/rclone/rclone/lib/rest"
 	"github.com/rclone/rclone/lib/version"
 	"golang.org/x/net/http/httpguts"
+	"golang.org/x/sync/errgroup"
 )
 
 // The S3 providers
@@ -128,6 +130,9 @@ var providerOption = fs.Option{
 		Value: "Linode",
 		Help:  "Linode Object Storage",
 	}, {
+		Value: "Magalu",
+		Help:  "Magalu Object Storage",
+	}, {
 		Value: "Minio",
 		Help:  "Minio Object Storage",
 	}, {
@@ -139,6 +144,9 @@ var providerOption = fs.Option{
 	}, {
 		Value: "RackCorp",
 		Help:  "RackCorp Object Storage",
+	}, {
+		Value: "Rclone",
+		Help:  "Rclone S3 Server",
 	}, {
 		Value: "Scaleway",
 		Help:  "Scaleway Object Storage",
@@ -284,6 +292,9 @@ func init() {
 			}, {
 				Value: "sa-east-1",
 				Help:  "South America (Sao Paulo) Region.\nNeeds location constraint sa-east-1.",
+			}, {
+				Value: "il-central-1",
+				Help:  "Israel (Tel Aviv) Region.\nNeeds location constraint il-central-1.",
 			}, {
 				Value: "me-south-1",
 				Help:  "Middle East (Bahrain) Region.\nNeeds location constraint me-south-1.",
@@ -522,7 +533,7 @@ func init() {
 		}, {
 			Name:     "region",
 			Help:     "Region to connect to.\n\nLeave blank if you are using an S3 clone and you don't have a region.",
-			Provider: "!AWS,Alibaba,ArvanCloud,ChinaMobile,Cloudflare,IONOS,Petabox,Liara,Linode,Qiniu,RackCorp,Scaleway,Storj,Synology,TencentCOS,HuaweiOBS,IDrive",
+			Provider: "!AWS,Alibaba,ArvanCloud,ChinaMobile,Cloudflare,IONOS,Petabox,Liara,Linode,Magalu,Qiniu,RackCorp,Scaleway,Storj,Synology,TencentCOS,HuaweiOBS,IDrive",
 			Examples: []fs.OptionExample{{
 				Value: "",
 				Help:  "Use this if unsure.\nWill use v4 signatures and an empty region.",
@@ -926,6 +937,19 @@ func init() {
 				Help:  "Washington, DC, (USA), us-iad-1",
 			}},
 		}, {
+			// Magalu endpoints: https://docs.magalu.cloud/docs/object-storage/how-to/copy-url
+			Name:     "endpoint",
+			Help:     "Endpoint for Magalu Object Storage API.",
+			Provider: "Magalu",
+			Examples: []fs.OptionExample{{
+				Value: "br-se1.magaluobjects.com",
+				Help:  "São Paulo, SP (BR), br-se1",
+			}, {
+				Value: "br-ne1.magaluobjects.com",
+				Help:  "Fortaleza, CE (BR), br-ne1",
+			},
+			},
+		}, {
 			// oss endpoints: https://help.aliyun.com/document_detail/31837.html
 			Name:     "endpoint",
 			Help:     "Endpoint for OSS API.",
@@ -1277,7 +1301,7 @@ func init() {
 		}, {
 			Name:     "endpoint",
 			Help:     "Endpoint for S3 API.\n\nRequired when using an S3 clone.",
-			Provider: "!AWS,ArvanCloud,IBMCOS,IDrive,IONOS,TencentCOS,HuaweiOBS,Alibaba,ChinaMobile,GCS,Liara,Linode,Scaleway,StackPath,Storj,Synology,RackCorp,Qiniu,Petabox",
+			Provider: "!AWS,ArvanCloud,IBMCOS,IDrive,IONOS,TencentCOS,HuaweiOBS,Alibaba,ChinaMobile,GCS,Liara,Linode,MagaluCloud,Scaleway,StackPath,Storj,Synology,RackCorp,Qiniu,Petabox",
 			Examples: []fs.OptionExample{{
 				Value:    "objects-us-east-1.dream.io",
 				Help:     "Dream Objects endpoint",
@@ -1386,6 +1410,14 @@ func init() {
 				Value:    "s3.ir-tbz-sh1.arvanstorage.ir",
 				Help:     "ArvanCloud Tabriz Iran (Shahriar) endpoint",
 				Provider: "ArvanCloud",
+			}, {
+				Value:    "br-se1.magaluobjects.com",
+				Help:     "Magalu BR Southeast 1 endpoint",
+				Provider: "Magalu",
+			}, {
+				Value:    "br-ne1.magaluobjects.com",
+				Help:     "Magalu BR Northeast 1 endpoint",
+				Provider: "Magalu",
 			}},
 		}, {
 			Name:     "location_constraint",
@@ -1448,6 +1480,9 @@ func init() {
 			}, {
 				Value: "sa-east-1",
 				Help:  "South America (Sao Paulo) Region",
+			}, {
+				Value: "il-central-1",
+				Help:  "Israel (Tel Aviv) Region",
 			}, {
 				Value: "me-south-1",
 				Help:  "Middle East (Bahrain) Region",
@@ -1765,7 +1800,7 @@ func init() {
 		}, {
 			Name:     "location_constraint",
 			Help:     "Location constraint - must be set to match the Region.\n\nLeave blank if not sure. Used when creating buckets only.",
-			Provider: "!AWS,Alibaba,ArvanCloud,HuaweiOBS,ChinaMobile,Cloudflare,IBMCOS,IDrive,IONOS,Leviia,Liara,Linode,Qiniu,RackCorp,Scaleway,StackPath,Storj,TencentCOS,Petabox",
+			Provider: "!AWS,Alibaba,ArvanCloud,HuaweiOBS,ChinaMobile,Cloudflare,IBMCOS,IDrive,IONOS,Leviia,Liara,Linode,Magalu,Qiniu,RackCorp,Scaleway,StackPath,Storj,TencentCOS,Petabox",
 		}, {
 			Name: "acl",
 			Help: `Canned ACL used when creating buckets and storing or copying objects.
@@ -2021,6 +2056,15 @@ If you leave it blank, this is calculated automatically from the sse_customer_ke
 				Help:  "Standard storage class",
 			}},
 		}, {
+			// Mapping from here: #todo
+			Name:     "storage_class",
+			Help:     "The storage class to use when storing new objects in Magalu.",
+			Provider: "Magalu",
+			Examples: []fs.OptionExample{{
+				Value: "STANDARD",
+				Help:  "Standard storage class",
+			}},
+		}, {
 			// Mapping from here: https://intl.cloud.tencent.com/document/product/436/30925
 			Name:     "storage_class",
 			Help:     "The storage class to use when storing new objects in Tencent COS.",
@@ -2181,10 +2225,10 @@ If empty it will default to the environment variable "AWS_PROFILE" or
 			Sensitive: true,
 		}, {
 			Name: "upload_concurrency",
-			Help: `Concurrency for multipart uploads.
+			Help: `Concurrency for multipart uploads and copies.
 
 This is the number of chunks of the same file that are uploaded
-concurrently.
+concurrently for multipart uploads and copies.
 
 If you are uploading small numbers of large files over high-speed links
 and these uploads do not fully utilize your bandwidth, then increasing
@@ -2213,6 +2257,13 @@ If this is false (the default) then rclone will use v4 authentication.
 If it is set then rclone will use v2 authentication.
 
 Use this only if v4 signatures don't work, e.g. pre Jewel/v10 CEPH.`,
+			Default:  false,
+			Advanced: true,
+		}, {
+			Name: "use_dual_stack",
+			Help: `If true use AWS S3 dual-stack endpoint (IPv6 support).
+
+See [AWS Docs on Dualstack Endpoints](https://docs.aws.amazon.com/AmazonS3/latest/userguide/dual-stack-endpoints.html)`,
 			Default:  false,
 			Advanced: true,
 		}, {
@@ -2423,6 +2474,19 @@ See [the time option docs](/docs/#time-option) for valid formats.
 			Default:  fs.Time{},
 			Advanced: true,
 		}, {
+			Name: "version_deleted",
+			Help: `Show deleted file markers when using versions.
+
+This shows deleted file markers in the listing when using versions. These will appear
+as 0 size files. The only operation which can be performed on them is deletion.
+
+Deleting a delete marker will reveal the previous version.
+
+Deleted files will always show with a timestamp.
+`,
+			Default:  false,
+			Advanced: true,
+		}, {
 			Name: "decompress",
 			Help: `If set this will decompress gzip encoded objects.
 
@@ -2487,6 +2551,45 @@ In this case, you might want to try disabling this option.
 			Name:     "sts_endpoint",
 			Help:     "Endpoint for STS.\n\nLeave blank if using AWS to use the default endpoint for the region.",
 			Provider: "AWS",
+			Advanced: true,
+		}, {
+			Name: "use_already_exists",
+			Help: strings.ReplaceAll(`Set if rclone should report BucketAlreadyExists errors on bucket creation.
+
+At some point during the evolution of the s3 protocol, AWS started
+returning an |AlreadyOwnedByYou| error when attempting to create a
+bucket that the user already owned, rather than a
+|BucketAlreadyExists| error.
+
+Unfortunately exactly what has been implemented by s3 clones is a
+little inconsistent, some return |AlreadyOwnedByYou|, some return
+|BucketAlreadyExists| and some return no error at all.
+
+This is important to rclone because it ensures the bucket exists by
+creating it on quite a lot of operations (unless
+|--s3-no-check-bucket| is used).
+
+If rclone knows the provider can return |AlreadyOwnedByYou| or returns
+no error then it can report |BucketAlreadyExists| errors when the user
+attempts to create a bucket not owned by them. Otherwise rclone
+ignores the |BucketAlreadyExists| error which can lead to confusion.
+
+This should be automatically set correctly for all providers rclone
+knows about - please make a bug report if not.
+`, "|", "`"),
+			Default:  fs.Tristate{},
+			Advanced: true,
+		}, {
+			Name: "use_multipart_uploads",
+			Help: `Set if rclone should use multipart uploads.
+
+You can change this if you want to disable the use of multipart uploads.
+This shouldn't be necessary in normal operation.
+
+This should be automatically set correctly for all providers rclone
+knows about - please make a bug report if not.
+`,
+			Default:  fs.Tristate{},
 			Advanced: true,
 		},
 		}})
@@ -2572,6 +2675,7 @@ type Options struct {
 	Region                string               `config:"region"`
 	Endpoint              string               `config:"endpoint"`
 	STSEndpoint           string               `config:"sts_endpoint"`
+	UseDualStack          bool                 `config:"use_dual_stack"`
 	LocationConstraint    string               `config:"location_constraint"`
 	ACL                   string               `config:"acl"`
 	BucketACL             string               `config:"bucket_acl"`
@@ -2610,10 +2714,13 @@ type Options struct {
 	UsePresignedRequest   bool                 `config:"use_presigned_request"`
 	Versions              bool                 `config:"versions"`
 	VersionAt             fs.Time              `config:"version_at"`
+	VersionDeleted        bool                 `config:"version_deleted"`
 	Decompress            bool                 `config:"decompress"`
 	MightGzip             fs.Tristate          `config:"might_gzip"`
 	UseAcceptEncodingGzip fs.Tristate          `config:"use_accept_encoding_gzip"`
 	NoSystemMetadata      bool                 `config:"no_system_metadata"`
+	UseAlreadyExists      fs.Tristate          `config:"use_already_exists"`
+	UseMultipartUploads   fs.Tristate          `config:"use_multipart_uploads"`
 }
 
 // Fs represents a remote s3 server
@@ -2868,6 +2975,7 @@ func s3Connection(ctx context.Context, opt *Options, client *http.Client) (*s3.S
 	case v.AccessKeyID == "" && v.SecretAccessKey == "":
 		// if no access key/secret and iam is explicitly disabled then fall back to anon interaction
 		cred = credentials.AnonymousCredentials
+		fs.Debugf(nil, "Using anonymous credentials - did you mean to set env_auth=true?")
 	case v.AccessKeyID == "":
 		return nil, nil, errors.New("access_key_id not found")
 	case v.SecretAccessKey == "":
@@ -2895,6 +3003,9 @@ func s3Connection(ctx context.Context, opt *Options, client *http.Client) (*s3.S
 		r.addService("s3", opt.Endpoint)
 		r.addService("sts", opt.STSEndpoint)
 		awsConfig.WithEndpointResolver(r)
+	}
+	if opt.UseDualStack {
+		awsConfig.UseDualStackEndpoint = endpoints.DualStackEndpointStateEnabled
 	}
 
 	// awsConfig.WithLogLevel(aws.LogDebugWithSigning)
@@ -2950,6 +3061,14 @@ func (f *Fs) setUploadChunkSize(cs fs.SizeSuffix) (old fs.SizeSuffix, err error)
 	return
 }
 
+func checkCopyCutoff(cs fs.SizeSuffix) error {
+	minCopySize := fs.SizeSuffixBase
+	if cs < minCopySize {
+		return fmt.Errorf("value is too small (%v is less than %v)", cs, minCopySize)
+	}
+	return nil
+}
+
 func checkUploadCutoff(cs fs.SizeSuffix) error {
 	if cs > maxUploadCutoff {
 		return fmt.Errorf("%s is greater than %s", cs, maxUploadCutoff)
@@ -2958,9 +3077,19 @@ func checkUploadCutoff(cs fs.SizeSuffix) error {
 }
 
 func (f *Fs) setUploadCutoff(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
-	err = checkUploadCutoff(cs)
+	if f.opt.Provider != "Rclone" {
+		err = checkUploadCutoff(cs)
+	}
 	if err == nil {
 		old, f.opt.UploadCutoff = f.opt.UploadCutoff, cs
+	}
+	return
+}
+
+func (f *Fs) setCopyCutoff(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
+	err = checkUploadChunkSize(cs)
+	if err == nil {
+		old, f.opt.CopyCutoff = f.opt.CopyCutoff, cs
 	}
 	return
 }
@@ -3012,6 +3141,8 @@ func setQuirks(opt *Options) {
 		useMultipartEtag      = true // Set if Etags for multpart uploads are compatible with AWS
 		useAcceptEncodingGzip = true // Set Accept-Encoding: gzip
 		mightGzip             = true // assume all providers might use content encoding gzip until proven otherwise
+		useAlreadyExists      = true // Set if provider returns AlreadyOwnedByYou or no error if you try to remake your own bucket
+		useMultipartUploads   = true // Set if provider supports multipart uploads
 	)
 	switch opt.Provider {
 	case "AWS":
@@ -3019,18 +3150,22 @@ func setQuirks(opt *Options) {
 		mightGzip = false // Never auto gzips objects
 	case "Alibaba":
 		useMultipartEtag = false // Alibaba seems to calculate multipart Etags differently from AWS
+		useAlreadyExists = true  // returns 200 OK
 	case "HuaweiOBS":
 		// Huawei OBS PFS is not support listObjectV2, and if turn on the urlEncodeListing, marker will not work and keep list same page forever.
 		urlEncodeListings = false
 		listObjectsV2 = false
+		useAlreadyExists = false // untested
 	case "Ceph":
 		listObjectsV2 = false
 		virtualHostStyle = false
 		urlEncodeListings = false
+		useAlreadyExists = true
 	case "ChinaMobile":
 		listObjectsV2 = false
 		virtualHostStyle = false
 		urlEncodeListings = false
+		useAlreadyExists = false // untested
 	case "Cloudflare":
 		virtualHostStyle = false
 		useMultipartEtag = false // currently multipart Etags are random
@@ -3038,88 +3173,121 @@ func setQuirks(opt *Options) {
 		listObjectsV2 = false
 		virtualHostStyle = false
 		urlEncodeListings = false
+		useAlreadyExists = false // untested
 	case "DigitalOcean":
 		urlEncodeListings = false
+		useAlreadyExists = false // untested
 	case "Dreamhost":
 		urlEncodeListings = false
+		useAlreadyExists = false // untested
 	case "IBMCOS":
 		listObjectsV2 = false // untested
 		virtualHostStyle = false
 		urlEncodeListings = false
 		useMultipartEtag = false // untested
+		useAlreadyExists = false // returns BucketAlreadyExists
 	case "IDrive":
 		virtualHostStyle = false
+		useAlreadyExists = false // untested
 	case "IONOS":
 		// listObjectsV2 supported - https://api.ionos.com/docs/s3/#Basic-Operations-get-Bucket-list-type-2
 		virtualHostStyle = false
 		urlEncodeListings = false
+		useAlreadyExists = false // untested
 	case "Petabox":
-		// No quirks
+		useAlreadyExists = false // untested
 	case "Liara":
 		virtualHostStyle = false
 		urlEncodeListings = false
 		useMultipartEtag = false
+		useAlreadyExists = false // untested
 	case "Linode":
-		// No quirks
+		useAlreadyExists = true // returns 200 OK
 	case "LyveCloud":
 		useMultipartEtag = false // LyveCloud seems to calculate multipart Etags differently from AWS
+		useAlreadyExists = false // untested
+	case "Magalu":
+		listObjectsV2 = false
+		virtualHostStyle = false
+		urlEncodeListings = false
+		useMultipartEtag = false
+		useAlreadyExists = false
 	case "Minio":
 		virtualHostStyle = false
 	case "Netease":
 		listObjectsV2 = false // untested
 		urlEncodeListings = false
 		useMultipartEtag = false // untested
+		useAlreadyExists = false // untested
 	case "RackCorp":
 		// No quirks
 		useMultipartEtag = false // untested
+		useAlreadyExists = false // untested
+	case "Rclone":
+		listObjectsV2 = true
+		urlEncodeListings = true
+		virtualHostStyle = false
+		useMultipartEtag = false
+		useAlreadyExists = false
+		// useMultipartUploads = false - set this manually
 	case "Scaleway":
 		// Scaleway can only have 1000 parts in an upload
 		if opt.MaxUploadParts > 1000 {
 			opt.MaxUploadParts = 1000
 		}
-		urlEncodeListings = false
+		urlEncodeListings = true
+		useAlreadyExists = true
 	case "SeaweedFS":
 		listObjectsV2 = false // untested
 		virtualHostStyle = false
 		urlEncodeListings = false
 		useMultipartEtag = false // untested
+		useAlreadyExists = false // untested
 	case "StackPath":
 		listObjectsV2 = false // untested
 		virtualHostStyle = false
 		urlEncodeListings = false
+		useAlreadyExists = false // untested
 	case "Storj":
 		// Force chunk size to >= 64 MiB
 		if opt.ChunkSize < 64*fs.Mebi {
 			opt.ChunkSize = 64 * fs.Mebi
 		}
+		useAlreadyExists = false // returns BucketAlreadyExists
 	case "Synology":
 		useMultipartEtag = false
+		useAlreadyExists = false // untested
 	case "TencentCOS":
 		listObjectsV2 = false    // untested
 		useMultipartEtag = false // untested
+		useAlreadyExists = false // untested
 	case "Wasabi":
-		// No quirks
+		useAlreadyExists = true // returns 200 OK
 	case "Leviia":
-		// No quirks
+		useAlreadyExists = false // untested
 	case "Qiniu":
 		useMultipartEtag = false
 		urlEncodeListings = false
 		virtualHostStyle = false
+		useAlreadyExists = false // untested
 	case "GCS":
 		// Google break request Signature by mutating accept-encoding HTTP header
 		// https://github.com/rclone/rclone/issues/6670
 		useAcceptEncodingGzip = false
+		useAlreadyExists = true // returns BucketNameUnavailable instead of BucketAlreadyExists but good enough!
+		// GCS S3 doesn't support multi-part server side copy:
+		// See: https://issuetracker.google.com/issues/323465186
+		// So make cutoff very large which it does seem to support
+		opt.CopyCutoff = math.MaxInt64
+	default:
+		fs.Logf("s3", "s3 provider %q not known - please set correctly", opt.Provider)
+		fallthrough
 	case "Other":
 		listObjectsV2 = false
 		virtualHostStyle = false
 		urlEncodeListings = false
 		useMultipartEtag = false
-	default:
-		fs.Logf("s3", "s3 provider %q not known - please set correctly", opt.Provider)
-		listObjectsV2 = false
-		virtualHostStyle = false
-		urlEncodeListings = false
-		useMultipartEtag = false
+		useAlreadyExists = false
 	}
 
 	// Path Style vs Virtual Host style
@@ -3159,6 +3327,22 @@ func setQuirks(opt *Options) {
 		opt.UseAcceptEncodingGzip.Valid = true
 		opt.UseAcceptEncodingGzip.Value = useAcceptEncodingGzip
 	}
+
+	// Has the provider got AlreadyOwnedByYou error?
+	if !opt.UseAlreadyExists.Valid {
+		opt.UseAlreadyExists.Valid = true
+		opt.UseAlreadyExists.Value = useAlreadyExists
+	}
+
+	// Set the correct use multipart uploads if not manually set
+	if !opt.UseMultipartUploads.Valid {
+		opt.UseMultipartUploads.Valid = true
+		opt.UseMultipartUploads.Value = useMultipartUploads
+	}
+	if !opt.UseMultipartUploads.Value {
+		opt.UploadCutoff = math.MaxInt64
+	}
+
 }
 
 // setRoot changes the root of the Fs
@@ -3190,6 +3374,10 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	err = checkUploadCutoff(opt.UploadCutoff)
 	if err != nil {
 		return nil, fmt.Errorf("s3: upload cutoff: %w", err)
+	}
+	err = checkCopyCutoff(opt.CopyCutoff)
+	if err != nil {
+		return nil, fmt.Errorf("s3: --s3-copy-cutoff: %w", err)
 	}
 	if opt.Versions && opt.VersionAt.IsSet() {
 		return nil, errors.New("s3: can't use --s3-versions and --s3-version-at at the same time")
@@ -3271,6 +3459,10 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		f.features.CanHaveEmptyDirectories = true
 	}
 	// f.listMultipartUploads()
+	if !opt.UseMultipartUploads.Value {
+		fs.Debugf(f, "Disabling multipart uploads")
+		f.features.OpenChunkWriter = nil
+	}
 
 	if f.rootBucket != "" && f.rootDirectory != "" && !opt.NoHeadObject && !strings.HasSuffix(root, "/") {
 		// Check to see if the (bucket,directory) is actually an existing file
@@ -3315,6 +3507,7 @@ func (f *Fs) getMetaDataListing(ctx context.Context, wantRemote string) (info *s
 		withVersions: f.opt.Versions,
 		findFile:     true,
 		versionAt:    f.opt.VersionAt,
+		hidden:       f.opt.VersionDeleted,
 	}, func(gotRemote string, object *s3.Object, objectVersionID *string, isDirectory bool) error {
 		if isDirectory {
 			return nil
@@ -3376,6 +3569,10 @@ func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *s3.Obje
 		o.bytes = aws.Int64Value(info.Size)
 		o.storageClass = stringClonePointer(info.StorageClass)
 		o.versionID = stringClonePointer(versionID)
+		// If is delete marker, show that metadata has been read as there is none to read
+		if info.Size == isDeleteMarker {
+			o.meta = map[string]string{}
+		}
 	} else if !o.fs.opt.NoHeadObject {
 		err := o.readMetaData(ctx) // reads info and meta, returning an error
 		if err != nil {
@@ -3626,6 +3823,9 @@ func (ls *versionsList) List(ctx context.Context) (resp *s3.ListObjectsV2Output,
 	// Set up the request for next time
 	ls.req.KeyMarker = respVersions.NextKeyMarker
 	ls.req.VersionIdMarker = respVersions.NextVersionIdMarker
+	if aws.BoolValue(respVersions.IsTruncated) && ls.req.KeyMarker == nil {
+		return nil, nil, errors.New("s3 protocol error: received versions listing with IsTruncated set with no NextKeyMarker")
+	}
 
 	// If we are URL encoding then must decode the marker
 	if ls.req.KeyMarker != nil && ls.req.EncodingType != nil {
@@ -3670,7 +3870,7 @@ func (ls *versionsList) List(ctx context.Context) (resp *s3.ListObjectsV2Output,
 		//structs.SetFrom(obj, objVersion)
 		setFrom_s3Object_s3ObjectVersion(obj, objVersion)
 		// Adjust the file names
-		if !ls.usingVersionAt && !aws.BoolValue(objVersion.IsLatest) {
+		if !ls.usingVersionAt && (!aws.BoolValue(objVersion.IsLatest) || objVersion.Size == isDeleteMarker) {
 			if obj.Key != nil && objVersion.LastModified != nil {
 				*obj.Key = version.Add(*obj.Key, *objVersion.LastModified)
 			}
@@ -3865,14 +4065,16 @@ func (f *Fs) list(ctx context.Context, opt listOpt, fn listFn) error {
 					isDirectory = false
 				} else {
 					// Don't insert the root directory
-					if remote == opt.directory {
+					if remote == f.opt.Enc.ToStandardPath(opt.directory) {
 						continue
 					}
-					// process directory markers as directories
-					remote = strings.TrimRight(remote, "/")
 				}
 			}
 			remote = remote[len(opt.prefix):]
+			if isDirectory {
+				// process directory markers as directories
+				remote = strings.TrimRight(remote, "/")
+			}
 			if opt.addBucket {
 				remote = bucket.Join(opt.bucket, remote)
 			}
@@ -3936,6 +4138,7 @@ func (f *Fs) listDir(ctx context.Context, bucket, directory, prefix string, addB
 		addBucket:    addBucket,
 		withVersions: f.opt.Versions,
 		versionAt:    f.opt.VersionAt,
+		hidden:       f.opt.VersionDeleted,
 	}, func(remote string, object *s3.Object, versionID *string, isDirectory bool) error {
 		entry, err := f.itemToDirEntry(ctx, remote, object, versionID, isDirectory)
 		if err != nil {
@@ -4022,6 +4225,7 @@ func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (
 			recurse:      true,
 			withVersions: f.opt.Versions,
 			versionAt:    f.opt.VersionAt,
+			hidden:       f.opt.VersionDeleted,
 		}, func(remote string, object *s3.Object, versionID *string, isDirectory bool) error {
 			entry, err := f.itemToDirEntry(ctx, remote, object, versionID, isDirectory)
 			if err != nil {
@@ -4185,8 +4389,17 @@ func (f *Fs) makeBucket(ctx context.Context, bucket string) error {
 			fs.Infof(f, "Bucket %q created with ACL %q", bucket, f.opt.BucketACL)
 		}
 		if awsErr, ok := err.(awserr.Error); ok {
-			if code := awsErr.Code(); code == "BucketAlreadyOwnedByYou" || code == "BucketAlreadyExists" {
+			switch awsErr.Code() {
+			case "BucketAlreadyOwnedByYou":
 				err = nil
+			case "BucketAlreadyExists", "BucketNameUnavailable":
+				if f.opt.UseAlreadyExists.Value {
+					// We can trust BucketAlreadyExists to mean not owned by us, so make it non retriable
+					err = fserrors.NoRetryError(err)
+				} else {
+					// We can't trust BucketAlreadyExists to mean not owned by us, so ignore it
+					err = nil
+				}
 			}
 		}
 		return err
@@ -4356,10 +4569,20 @@ func (f *Fs) copyMultipart(ctx context.Context, copyReq *s3.CopyObjectInput, dst
 
 	fs.Debugf(src, "Starting  multipart copy with %d parts", numParts)
 
-	var parts []*s3.CompletedPart
+	var (
+		parts   = make([]*s3.CompletedPart, numParts)
+		g, gCtx = errgroup.WithContext(ctx)
+	)
+	g.SetLimit(f.opt.UploadConcurrency)
 	for partNum := int64(1); partNum <= numParts; partNum++ {
-		if err := f.pacer.Call(func() (bool, error) {
-			partNum := partNum
+		// Fail fast, in case an errgroup managed function returns an error
+		// gCtx is cancelled. There is no point in uploading all the other parts.
+		if gCtx.Err() != nil {
+			break
+		}
+		partNum := partNum // for closure
+		g.Go(func() error {
+			var uout *s3.UploadPartCopyOutput
 			uploadPartReq := &s3.UploadPartCopyInput{}
 			//structs.SetFrom(uploadPartReq, copyReq)
 			setFrom_s3UploadPartCopyInput_s3CopyObjectInput(uploadPartReq, copyReq)
@@ -4368,18 +4591,24 @@ func (f *Fs) copyMultipart(ctx context.Context, copyReq *s3.CopyObjectInput, dst
 			uploadPartReq.PartNumber = &partNum
 			uploadPartReq.UploadId = uid
 			uploadPartReq.CopySourceRange = aws.String(calculateRange(partSize, partNum-1, numParts, srcSize))
-			uout, err := f.c.UploadPartCopyWithContext(ctx, uploadPartReq)
+			err := f.pacer.Call(func() (bool, error) {
+				uout, err = f.c.UploadPartCopyWithContext(gCtx, uploadPartReq)
+				return f.shouldRetry(gCtx, err)
+			})
 			if err != nil {
-				return f.shouldRetry(ctx, err)
+				return err
 			}
-			parts = append(parts, &s3.CompletedPart{
+			parts[partNum-1] = &s3.CompletedPart{
 				PartNumber: &partNum,
 				ETag:       uout.CopyPartResult.ETag,
-			})
-			return false, nil
-		}); err != nil {
-			return err
-		}
+			}
+			return nil
+		})
+	}
+
+	err = g.Wait()
+	if err != nil {
+		return err
 	}
 
 	return f.pacer.Call(func() (bool, error) {
@@ -4419,10 +4648,22 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		fs.Debugf(src, "Can't copy - not same remote type")
 		return nil, fs.ErrorCantCopy
 	}
+
 	srcBucket, srcPath := srcObj.split()
 	req := s3.CopyObjectInput{
 		MetadataDirective: aws.String(s3.MetadataDirectiveCopy),
 	}
+
+	// Update the metadata if it is in use
+	if ci := fs.GetConfig(ctx); ci.Metadata {
+		ui, err := srcObj.prepareUpload(ctx, src, fs.MetadataAsOpenOptions(ctx), true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to prepare upload: %w", err)
+		}
+		setFrom_s3CopyObjectInput_s3PutObjectInput(&req, ui.req)
+		req.MetadataDirective = aws.String(s3.MetadataDirectiveReplace)
+	}
+
 	err = f.copy(ctx, &req, dstBucket, dstPath, srcBucket, srcPath, srcObj)
 	if err != nil {
 		return nil, err
@@ -4779,6 +5020,7 @@ func (f *Fs) restoreStatus(ctx context.Context, all bool) (out []restoreStatusOu
 		recurse:       true,
 		withVersions:  f.opt.Versions,
 		versionAt:     f.opt.VersionAt,
+		hidden:        f.opt.VersionDeleted,
 		restoreStatus: true,
 	}, func(remote string, object *s3.Object, versionID *string, isDirectory bool) error {
 		entry, err := f.itemToDirEntry(ctx, remote, object, versionID, isDirectory)
@@ -5180,7 +5422,7 @@ func (f *Fs) headObject(ctx context.Context, req *s3.HeadObjectInput) (resp *s3.
 	})
 	if err != nil {
 		if awsErr, ok := err.(awserr.RequestFailure); ok {
-			if awsErr.StatusCode() == http.StatusNotFound {
+			if awsErr.StatusCode() == http.StatusNotFound || awsErr.StatusCode() == http.StatusMethodNotAllowed {
 				return nil, fs.ErrorObjectNotFound
 			}
 		}
@@ -5524,7 +5766,7 @@ func (f *Fs) OpenChunkWriter(ctx context.Context, remote string, src fs.ObjectIn
 		fs:     f,
 		remote: remote,
 	}
-	ui, err := o.prepareUpload(ctx, src, options)
+	ui, err := o.prepareUpload(ctx, src, options, false)
 	if err != nil {
 		return info, nil, fmt.Errorf("failed to prepare upload: %w", err)
 	}
@@ -5559,6 +5801,13 @@ func (f *Fs) OpenChunkWriter(ctx context.Context, remote string, src fs.ObjectIn
 	var mOut *s3.CreateMultipartUploadOutput
 	err = f.pacer.Call(func() (bool, error) {
 		mOut, err = f.c.CreateMultipartUploadWithContext(ctx, &mReq)
+		if err == nil {
+			if mOut == nil {
+				err = fserrors.RetryErrorf("internal error: no info from multipart upload")
+			} else if mOut.UploadId == nil {
+				err = fserrors.RetryErrorf("internal error: no UploadId in multpart upload: %#v", *mOut)
+			}
+		}
 		return f.shouldRetry(ctx, err)
 	})
 	if err != nil {
@@ -5884,7 +6133,9 @@ type uploadInfo struct {
 }
 
 // Prepare object for being uploaded
-func (o *Object) prepareUpload(ctx context.Context, src fs.ObjectInfo, options []fs.OpenOption) (ui uploadInfo, err error) {
+//
+// If noHash is true the md5sum will not be calculated
+func (o *Object) prepareUpload(ctx context.Context, src fs.ObjectInfo, options []fs.OpenOption, noHash bool) (ui uploadInfo, err error) {
 	bucket, bucketPath := o.split()
 	// Create parent dir/bucket if not saving directory marker
 	if !strings.HasSuffix(o.remote, "/") {
@@ -5902,7 +6153,7 @@ func (o *Object) prepareUpload(ctx context.Context, src fs.ObjectInfo, options [
 	}
 
 	// Fetch metadata if --metadata is in use
-	meta, err := fs.GetMetadataOptions(ctx, src, options)
+	meta, err := fs.GetMetadataOptions(ctx, o.fs, src, options)
 	if err != nil {
 		return ui, fmt.Errorf("failed to read metadata from source object: %w", err)
 	}
@@ -5958,7 +6209,7 @@ func (o *Object) prepareUpload(ctx context.Context, src fs.ObjectInfo, options [
 	var md5sumBase64 string
 	size := src.Size()
 	multipart := size < 0 || size >= int64(o.fs.opt.UploadCutoff)
-	if !multipart || !o.fs.opt.DisableChecksum {
+	if !noHash && (!multipart || !o.fs.opt.DisableChecksum) {
 		ui.md5sumHex, err = src.Hash(ctx, hash.MD5)
 		if err == nil && matchMd5.MatchString(ui.md5sumHex) {
 			hashBytes, err := hex.DecodeString(ui.md5sumHex)
@@ -6068,9 +6319,9 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	var err error
 	var ui uploadInfo
 	if multipart {
-		wantETag, gotETag, versionID, ui, err = o.uploadMultipart(ctx, src, in)
+		wantETag, gotETag, versionID, ui, err = o.uploadMultipart(ctx, src, in, options...)
 	} else {
-		ui, err = o.prepareUpload(ctx, src, options)
+		ui, err = o.prepareUpload(ctx, src, options, false)
 		if err != nil {
 			return fmt.Errorf("failed to prepare upload: %w", err)
 		}
